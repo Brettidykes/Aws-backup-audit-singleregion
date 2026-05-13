@@ -7,7 +7,7 @@
 # - Native backup mechanisms
 # - All major AWS services
 #
-# Author: Brett Dykes - Cloud Ops Engineer
+# Author: Cloud Ops Team
 # Date: 2026-05-13
 
 set -euo pipefail
@@ -288,15 +288,25 @@ else
             backup_methods+=("DLM Policy")
         fi
         
-        # Check for recent AMIs (within last 7 days)
-        recent_amis=$(aws ec2 describe-images --region "$REGION" \
-            --owners self \
+        # Check for AMIs (any age)
+        latest_ami=$(aws ec2 describe-images --region "$REGION" \
             --filters "Name=name,Values=*${instance_id}*" \
-            --query "Images[?CreationDate >= '$(date -u -d '7 days ago' '+%Y-%m-%d' 2>/dev/null || date -u -v-7d '+%Y-%m-%d' 2>/dev/null || echo '2026-05-06')']" \
+            --query 'Images | sort_by(@, &CreationDate)[-1].[ImageId,CreationDate]' \
             --output text 2>/dev/null || echo "")
         
-        if [ -n "$recent_amis" ]; then
-            backup_methods+=("Recent AMI")
+        if [ -n "$latest_ami" ] && [ "$latest_ami" != "None" ]; then
+            ami_id=$(echo "$latest_ami" | awk '{print $1}')
+            ami_date=$(echo "$latest_ami" | awk '{print $2}')
+            
+            # Calculate days ago
+            if [ -n "$ami_date" ]; then
+                ami_epoch=$(date -d "$ami_date" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S" "${ami_date}T00:00:00" +%s 2>/dev/null || echo "0")
+                current_epoch=$(date +%s)
+                days_ago=$(( (current_epoch - ami_epoch) / 86400 ))
+                backup_methods+=("AMI: ${days_ago}d ago")
+            else
+                backup_methods+=("Has AMI")
+            fi
         fi
         
         if [ ${#backup_methods[@]} -gt 0 ]; then
@@ -338,15 +348,39 @@ else
             backup_methods+=("DLM Policy")
         fi
         
-        # Check for recent snapshots (within last 7 days)
-        recent_snapshots=$(aws ec2 describe-snapshots --region "$REGION" \
-            --owner-ids self \
+        # Check for snapshots (any age)
+        snapshot_count=$(aws ec2 describe-snapshots --region "$REGION" \
             --filters "Name=volume-id,Values=${volume_id}" \
-            --query "Snapshots[?StartTime >= '$(date -u -d '7 days ago' --iso-8601 2>/dev/null || date -u -v-7d '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || echo '2026-05-06T00:00:00')']" \
-            --output text 2>/dev/null || echo "")
+            --query 'length(Snapshots)' \
+            --output text 2>/dev/null || echo "0")
         
-        if [ -n "$recent_snapshots" ]; then
-            backup_methods+=("Recent snapshot")
+        if [ "$snapshot_count" -gt 0 ]; then
+            # Get the most recent snapshot
+            latest_snapshot=$(aws ec2 describe-snapshots --region "$REGION" \
+                --filters "Name=volume-id,Values=${volume_id}" \
+                --query 'Snapshots | sort_by(@, &StartTime)[-1].[SnapshotId,StartTime]' \
+                --output text 2>/dev/null || echo "")
+            
+            if [ -n "$latest_snapshot" ]; then
+                snapshot_id=$(echo "$latest_snapshot" | awk '{print $1}')
+                snapshot_date=$(echo "$latest_snapshot" | awk '{print $2}')
+                
+                # Calculate days ago
+                if [ -n "$snapshot_date" ]; then
+                    snapshot_epoch=$(date -d "$snapshot_date" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S" "$snapshot_date" +%s 2>/dev/null || echo "0")
+                    if [ "$snapshot_epoch" != "0" ]; then
+                        current_epoch=$(date +%s)
+                        days_ago=$(( (current_epoch - snapshot_epoch) / 86400 ))
+                        backup_methods+=("Snapshot: ${days_ago}d ago")
+                    else
+                        backup_methods+=("Has snapshots")
+                    fi
+                else
+                    backup_methods+=("Has snapshots")
+                fi
+            else
+                backup_methods+=("Has snapshots")
+            fi
         fi
         
         if [ ${#backup_methods[@]} -gt 0 ]; then
@@ -851,15 +885,22 @@ else
                     backup_methods+=("DLM Policy")
                 fi
                 
-                # Check for recent snapshots
-                recent_snapshots=$(aws ec2 describe-snapshots --region "$REGION" \
-                    --owner-ids self \
+                # Check for snapshots (any age)
+                latest_snapshot=$(aws ec2 describe-snapshots --region "$REGION" \
                     --filters "Name=volume-id,Values=${volume_id}" \
-                    --query "Snapshots[?StartTime >= '$(date -u -d '7 days ago' --iso-8601 2>/dev/null || date -u -v-7d '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || echo '2026-05-06T00:00:00')']" \
+                    --query 'Snapshots | sort_by(@, &StartTime)[-1].[SnapshotId,StartTime]' \
                     --output text 2>/dev/null || echo "")
                 
-                if [ -n "$recent_snapshots" ]; then
-                    backup_methods+=("Recent snapshot")
+                if [ -n "$latest_snapshot" ] && [ "$latest_snapshot" != "None" ]; then
+                    snapshot_date=$(echo "$latest_snapshot" | awk '{print $2}')
+                    if [ -n "$snapshot_date" ]; then
+                        snapshot_epoch=$(date -d "$snapshot_date" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S" "$snapshot_date" +%s 2>/dev/null || echo "0")
+                        current_epoch=$(date +%s)
+                        days_ago=$(( (current_epoch - snapshot_epoch) / 86400 ))
+                        backup_methods+=("Snapshot: ${days_ago}d ago")
+                    else
+                        backup_methods+=("Has snapshots")
+                    fi
                 fi
                 
                 if [ ${#backup_methods[@]} -gt 0 ]; then
